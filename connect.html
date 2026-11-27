@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Tagwerk</title>
+<meta name="description" content="Let Claude, or another app you choose, use your Tagwerk.">
+<meta name="robots" content="noindex">
+<link rel="icon" href="icon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800&family=Work+Sans:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<style>
+  /* Buttons only this page has: amber is the one to press, grey the other (brand.md). */
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 24px 0; }
+  button { font: 600 17px/1 "Work Sans", sans-serif; border-radius: 12px; padding: 14px 22px; border: 1px solid var(--line);
+           background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--amber); border-color: var(--amber); color: #141416; }
+  button:disabled { opacity: .5; cursor: default; }
+  .apps li { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .error { color: #e5484d; }
+  input { font: 17px "Work Sans", sans-serif; width: 100%; max-width: 360px; padding: 12px 14px; border-radius: 12px;
+          border: 1px solid var(--line); background: var(--card); color: var(--ink); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+<header><img src="icon.svg" alt=""><a href="./">Tagwerk</a><nav><a href="help.html">Help</a><a href="terms.html">Terms</a><a href="privacy.html">Privacy</a></nav></header>
+
+<!--
+  Tagwerk's OAuth consent page (27 Nov 2026, docs/claude-connector.md). When someone connects Tagwerk in Claude, Supabase
+  Auth sends them here with ?authorization_id=…; they sign in with Apple (the same Apple ID as in the app), see who's
+  asking and what it may do, and allow or deny. Opened without one, it lists the apps connected and lets them disconnect
+  any of them. The publishable key below is the one inside the app: it's meant to be public, and row-level security
+  keeps each person's data their own.
+-->
+<h1 id="title">Connect Tagwerk</h1>
+<p class="lead" id="lead">Sign in with the Apple ID you use in the Tagwerk app.</p>
+
+<div id="signin" hidden>
+  <div class="actions"><button class="primary" id="apple"> Sign in with Apple</button></div>
+  <!-- Test accounts (Anthropic's directory review): email and password, made by hand with free use. -->
+  <p><a href="#" id="emailtoggle">Have a test account?</a></p>
+  <form id="emailform" hidden>
+    <p><input id="email" type="email" autocomplete="username" placeholder="Email" required></p>
+    <p><input id="password" type="password" autocomplete="current-password" placeholder="Password" required></p>
+    <div class="actions"><button type="submit">Sign in</button></div>
+  </form>
+</div>
+
+<div id="consent" hidden>
+  <div class="card">
+    <p><strong id="client">An app</strong> wants to use your Tagwerk. It will be able to:</p>
+    <ul>
+      <li>read your days: meals, food targets, habits, water and steps</li>
+      <li>read your workouts, runs, swims and weigh-ins, and your weight goal</li>
+      <li>log meals and weigh-ins for you, and delete a meal when you ask</li>
+    </ul>
+    <p>It can't change your training program, your targets or your account, and it can't delete your account.</p>
+  </div>
+  <div class="actions">
+    <button class="primary" id="allow">Allow</button>
+    <button id="deny">Don't allow</button>
+  </div>
+  <p>You can disconnect it anytime on this page: <a href="connect.html">tagwerk.stonefield.app/connect.html</a>.</p>
+</div>
+
+<div id="manage" hidden>
+  <h2>Connected apps</h2>
+  <ul class="apps" id="apps"></ul>
+  <p id="none" hidden>No apps are connected to your Tagwerk.</p>
+  <p><a href="#" id="signout">Sign out of this page</a></p>
+</div>
+
+<p class="error" id="error" hidden></p>
+
+<footer><a href="./">Tagwerk</a><a href="help.html">Help</a><a href="terms.html">Terms</a><a href="privacy.html">Privacy</a><p>Stonefield Sp. z o.o., ul. Śniadeckich 10C/33, 60-774 Poznań, Poland. District Court Poznań – Nowe Miasto i Wilda in Poznań, 8th Commercial Division of the National Court Register; KRS 0001277274, NIP 7792614016, REGON 546122016; share capital PLN 5,000.</p></footer>
+</main>
+
+<script src="https://appleid.cdn-apple.com/appleauth/static/jsapi/appleid/1/en_US/appleid.auth.js"></script>
+<script type="module">
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.119.2";
+
+const SUPABASE_URL = "https://hhihwpficiauvhpijxkz.supabase.co";
+const PUBLISHABLE_KEY = "sb_publishable_sxHT-eHE_HOMWwhJakCZtw_DCuJf9UO";
+// The Services ID for signing in with Apple on the web (Apple Developer › Identifiers), also in supabase/config.toml.
+const APPLE_SERVICES_ID = "app.stonefield.tagwerk.web";
+
+const db = createClient(SUPABASE_URL, PUBLISHABLE_KEY);
+const $ = (id) => document.getElementById(id);
+const show = (id, on = true) => { $(id).hidden = !on; };
+const authorizationId = new URLSearchParams(location.search).get("authorization_id");
+
+function fail(message) {
+  $("error").textContent = message;
+  show("error");
+}
+
+async function sha256Hex(text) {
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Apple gets the hashed nonce and puts it in its token; Supabase gets the raw one and checks they match (as in the app).
+$("apple").onclick = async () => {
+  show("error", false);
+  $("apple").disabled = true;
+  try {
+    const nonce = crypto.randomUUID();
+    AppleID.auth.init({
+      clientId: APPLE_SERVICES_ID, scope: "", redirectURI: `${location.origin}/connect.html`,
+      usePopup: true, nonce: await sha256Hex(nonce),
+    });
+    const { authorization } = await AppleID.auth.signIn();
+    const { error } = await db.auth.signInWithIdToken({ provider: "apple", token: authorization.id_token, nonce });
+    if (error) throw error;
+    await start();
+  } catch (e) {
+    // Closing Apple's window isn't an error worth showing.
+    if (e?.error !== "popup_closed_by_user") fail(e?.message ?? "Signing in with Apple didn't work. Try again.");
+  } finally {
+    $("apple").disabled = false;
+  }
+};
+
+$("emailtoggle").onclick = (e) => {
+  e.preventDefault();
+  show("emailform");
+};
+
+$("emailform").onsubmit = async (e) => {
+  e.preventDefault();
+  show("error", false);
+  const { error } = await db.auth.signInWithPassword({ email: $("email").value, password: $("password").value });
+  if (error) return fail(error.message);
+  await start();
+};
+
+$("signout").onclick = async (e) => {
+  e.preventDefault();
+  await db.auth.signOut();
+  location.reload();
+};
+
+async function decide(approve) {
+  $("allow").disabled = $("deny").disabled = true;
+  const { data, error } = approve
+    ? await db.auth.oauth.approveAuthorization(authorizationId, { skipBrowserRedirect: true })
+    : await db.auth.oauth.denyAuthorization(authorizationId, { skipBrowserRedirect: true });
+  if (error) {
+    $("allow").disabled = $("deny").disabled = false;
+    return fail(error.message);
+  }
+  location.href = data.redirect_url;
+}
+$("allow").onclick = () => decide(true);
+$("deny").onclick = () => decide(false);
+
+async function listApps() {
+  const { data, error } = await db.auth.oauth.listGrants();
+  if (error) return fail(error.message);
+  const list = $("apps");
+  list.replaceChildren();
+  show("none", data.length === 0);
+  for (const grant of data) {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = grant.client.name || "An app";
+    const button = document.createElement("button");
+    button.textContent = "Disconnect";
+    button.onclick = async () => {
+      button.disabled = true;
+      const { error } = await db.auth.oauth.revokeGrant({ clientId: grant.client.id });
+      if (error) { button.disabled = false; return fail(error.message); }
+      await listApps();
+    };
+    item.append(name, button);
+    list.append(item);
+  }
+}
+
+async function start() {
+  const { data: { session } } = await db.auth.getSession();
+  if (!session) {
+    show("signin");
+    return;
+  }
+  show("signin", false);
+  // An Apple ID that has never been used in the app gets a new, empty account when it signs in here: say so instead of
+  // connecting an empty Tagwerk. Every account that has used the app has an `access` row (its free week or subscription).
+  const { data: access } = await db.from("access").select("user_id").maybeSingle();
+  if (!access) {
+    await db.auth.signOut();
+    $("lead").textContent = "This Apple ID isn't using Tagwerk yet. In the Tagwerk app on your iPhone, sign in with Apple " +
+      "(Account › Signed in as), then connect again.";
+    show("signin");
+    return;
+  }
+  if (!authorizationId) {
+    $("title").textContent = "Your connected apps";
+    $("lead").textContent = "Apps you've allowed to use your Tagwerk. Disconnect one and it loses access straight away.";
+    show("manage");
+    return listApps();
+  }
+  const { data, error } = await db.auth.oauth.getAuthorizationDetails(authorizationId);
+  if (error) return fail(error.message);
+  // Allowed before: straight back to the app.
+  if (!("authorization_id" in data)) {
+    location.href = data.redirect_url;
+    return;
+  }
+  $("title").textContent = `Connect ${data.client.name || "an app"}`;
+  $("lead").textContent = "Check who's asking, then allow or don't.";
+  $("client").textContent = data.client.name || "An app";
+  show("consent");
+}
+
+start().catch((e) => fail(e?.message ?? "Something went wrong. Reload the page."));
+</script>
+</body>
+</html>
